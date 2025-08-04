@@ -4,6 +4,7 @@ from torch.utils.data import Dataset
 import nibabel as nib
 import numpy as np
 from .data_utils import pkload
+from skimage.transform import resize
 
 
 class LiverMRIDataset(Dataset):
@@ -12,9 +13,10 @@ class LiverMRIDataset(Dataset):
     Handles variable number of sequences per patient and missing sequences.
     Data structure: MRI/patientID_B_C_R_applyXFM_XXXX.nii.gz
     """
-    def __init__(self, data_root, transforms, split='train', val_ratio=0.2):
+    def __init__(self, data_root, transforms, split='train', val_ratio=0.2, target_size=(160, 192, 224)):
         self.data_root = data_root
         self.transforms = transforms
+        self.target_size = target_size
         self.mri_dir = os.path.join(data_root, 'MRI')
         self.labels_dir = os.path.join(data_root, 'labels')
         
@@ -76,6 +78,13 @@ class LiverMRIDataset(Dataset):
         if img.max() > 0:
             img = img / img.max()
         return img
+    
+    def auto_resize(self, img):
+        """Automatically resize image to target size"""
+        if img.shape != self.target_size:
+            print(f"Resizing from {img.shape} to {self.target_size}")
+            img = resize(img, self.target_size, anti_aliasing=False, order=3, preserve_range=True)
+        return img.astype(np.float32)
 
     def __getitem__(self, index):
         # Find which patient and sequence pair this index corresponds to
@@ -118,7 +127,9 @@ class LiverMRIDataset(Dataset):
             # Return a random valid pair as fallback
             return self.__getitem__(0)
         
-        # Normalize images
+        # Auto-resize and normalize images
+        moving_img = self.auto_resize(moving_img)
+        fixed_img = self.auto_resize(fixed_img)
         moving_img = self.normalize_image(moving_img)
         fixed_img = self.normalize_image(fixed_img)
         
@@ -146,9 +157,10 @@ class LiverMRIValidationDataset(Dataset):
     Dataset for liver MRI validation with segmentation masks.
     Adapted for the new data structure with flexible sequence availability.
     """
-    def __init__(self, data_root, transforms):
+    def __init__(self, data_root, transforms, target_size=(160, 192, 224)):
         self.data_root = data_root
         self.transforms = transforms
+        self.target_size = target_size
         self.mri_dir = os.path.join(data_root, 'MRI')
         self.labels_dir = os.path.join(data_root, 'labels')
         
@@ -196,6 +208,20 @@ class LiverMRIValidationDataset(Dataset):
         if img.max() > 0:
             img = img / img.max()
         return img
+
+    def auto_resize(self, img):
+        """Automatically resize image to target size"""
+        if img.shape != self.target_size:
+            print(f"Resizing from {img.shape} to {self.target_size}")
+            img = resize(img, self.target_size, anti_aliasing=False, order=3, preserve_range=True)
+        return img.astype(np.float32)
+
+    def auto_resize_segmentation(self, seg):
+        """Automatically resize segmentation to target size using nearest neighbor"""
+        if seg.shape != self.target_size:
+            print(f"Resizing segmentation from {seg.shape} to {self.target_size}")
+            seg = resize(seg, self.target_size, anti_aliasing=False, order=0, preserve_range=True)
+        return seg.astype(np.int16)
 
     def process_segmentation(self, seg):
         """Process multi-class segmentation labels"""
@@ -247,11 +273,14 @@ class LiverMRIValidationDataset(Dataset):
             else:
                 raise e
         
-        # Normalize images
+        # Auto-resize and normalize images
+        moving_img = self.auto_resize(moving_img)
+        fixed_img = self.auto_resize(fixed_img)
         moving_img = self.normalize_image(moving_img)
         fixed_img = self.normalize_image(fixed_img)
         
-        # Process segmentation (use same seg for both moving and fixed for simplicity)
+        # Auto-resize and process segmentation (use same seg for both moving and fixed for simplicity)
+        seg_img = self.auto_resize_segmentation(seg_img)
         moving_seg = self.process_segmentation(seg_img)
         fixed_seg = self.process_segmentation(seg_img)
         

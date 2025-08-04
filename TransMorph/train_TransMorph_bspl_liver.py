@@ -142,8 +142,8 @@ def main(args):
     ])
 
     # Create datasets
-    train_set = LiverMRIDataset(data_root, transforms=train_composed, split='train')
-    val_set = LiverMRIValidationDataset(data_root, transforms=val_composed)
+    train_set = LiverMRIDataset(data_root, transforms=train_composed, split='train', target_size=config.img_size)
+    val_set = LiverMRIValidationDataset(data_root, transforms=val_composed, target_size=config.img_size)
     
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_set, batch_size=1, shuffle=False, num_workers=4, pin_memory=True, drop_last=True)
