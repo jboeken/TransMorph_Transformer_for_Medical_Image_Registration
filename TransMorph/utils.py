@@ -96,6 +96,8 @@ class register_model(nn.Module):
         return out
 
 def dice_val(y_pred, y_true, num_clus):
+    y_pred = torch.clamp(y_pred, 0, num_clus - 1)
+    y_true = torch.clamp(y_true, 0, num_clus - 1)
     y_pred = nn.functional.one_hot(y_pred, num_classes=num_clus)
     y_pred = torch.squeeze(y_pred, 1)
     y_pred = y_pred.permute(0, 4, 1, 2, 3).contiguous()

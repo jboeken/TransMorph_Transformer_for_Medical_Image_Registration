@@ -82,7 +82,6 @@ class LiverMRIDataset(Dataset):
     def auto_resize(self, img):
         """Automatically resize image to target size"""
         if img.shape != self.target_size:
-            print(f"Resizing from {img.shape} to {self.target_size}")
             img = resize(img, self.target_size, anti_aliasing=False, order=3, preserve_range=True)
         return img.astype(np.float32)
 
@@ -212,14 +211,12 @@ class LiverMRIValidationDataset(Dataset):
     def auto_resize(self, img):
         """Automatically resize image to target size"""
         if img.shape != self.target_size:
-            print(f"Resizing from {img.shape} to {self.target_size}")
             img = resize(img, self.target_size, anti_aliasing=False, order=3, preserve_range=True)
         return img.astype(np.float32)
 
     def auto_resize_segmentation(self, seg):
         """Automatically resize segmentation to target size using nearest neighbor"""
         if seg.shape != self.target_size:
-            print(f"Resizing segmentation from {seg.shape} to {self.target_size}")
             seg = resize(seg, self.target_size, anti_aliasing=False, order=0, preserve_range=True)
         return seg.astype(np.int16)
 

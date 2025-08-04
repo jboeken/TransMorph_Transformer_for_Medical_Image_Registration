@@ -10,42 +10,96 @@ from natsort import natsorted
 import models.transformation as transformation
 from models.TransMorph_bspl import CONFIGS as CONFIGS_TM
 import models.TransMorph_bspl as TransMorph_bspl
+import torch.nn.functional as F
+import argparse
+import nibabel as nib
+from skimage.transform import resize
+
+def resize_image_to_model(img, target_size):
+    """Resize image to model input size"""
+    if len(img.shape) == 5:  # [B, C, H, W, D]
+        img_np = img[0, 0].cpu().numpy()
+    elif len(img.shape) == 4:  # [B, H, W, D] 
+        img_np = img[0].cpu().numpy()
+    else:  # [H, W, D]
+        img_np = img
+    
+    if img_np.shape != tuple(target_size):
+        img_resized = resize(img_np, target_size, anti_aliasing=False, order=1, preserve_range=True)
+    else:
+        img_resized = img_np
+    
+    return torch.from_numpy(img_resized).float().cuda()[None, None, ...]
+
+def resize_flow_to_original(flow, original_size):
+    """Resize flow field back to original size and scale appropriately"""
+    flow_np = flow[0].cpu().numpy()  # [3, H, W, D] -> [3, H, W, D]
+    original_size = tuple(original_size)
+    
+    if flow_np.shape[1:] == original_size:
+        return flow
+    
+    # Resize each flow component
+    flow_resized = np.zeros((3,) + original_size, dtype=np.float32)
+    scale_factors = [original_size[i] / flow_np.shape[i+1] for i in range(3)]
+    
+    for i in range(3):
+        flow_resized[i] = resize(flow_np[i], original_size, anti_aliasing=False, order=1, preserve_range=True)
+        flow_resized[i] *= scale_factors[i]  # Scale flow values appropriately
+    
+    return torch.from_numpy(flow_resized).cuda()[None, ...]
 
 def main():
-    # Data and model paths
-    data_root = '/Users/janik/Documents/GitHub/FactorCL-Liver/2D_Liver/FactorCL/Flos Daten'
-    model_folder = 'TransMorphBSpline_Liver_mse_1_diffusion_0.01/'
-    model_dir = 'experiments/' + model_folder
-    
-    # Select which model checkpoint to use (-1 for latest)
-    model_idx = -1
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_root', type=str, default='/Users/janik/Documents/GitHub/FactorCL-Liver/2D_Liver/FactorCL/Flos Daten', help='Path to data root')
+    parser.add_argument('--model_path', type=str, required=True, help='Path to trained model checkpoint')
+    parser.add_argument('--output_dir', type=str, default='results/', help='Output directory for results')
+    parser.add_argument('--model_size', type=int, nargs=3, default=[160, 192, 224], help='Model input size [H W D]')
+    parser.add_argument('--num_classes', type=int, default=8, help='Number of segmentation classes')
+    args = parser.parse_args()
     
     # Load model configuration
     config = CONFIGS_TM['TransMorphBSpline']
+    config.img_size = args.model_size
     model = TransMorph_bspl.TranMorphBSplineNet(config)
     
-    # Load trained weights
-    if os.path.exists(model_dir):
-        model_files = natsorted(glob.glob(model_dir + '*.pth.tar'))
-        if model_files:
-            best_model = torch.load(model_files[model_idx])['state_dict']
-            print('Best model: {}'.format(os.path.basename(model_files[model_idx])))
-            model.load_state_dict(best_model)
+    # Load trained weights from training script format
+    if os.path.exists(args.model_path):
+        checkpoint = torch.load(args.model_path, map_location='cpu')
+        if 'state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['state_dict'])
+            print(f'Loaded model from: {args.model_path}')
+            if 'best_dsc' in checkpoint:
+                print(f'Model best DSC: {checkpoint["best_dsc"]:.4f}')
         else:
-            print("No trained model found! Please train the model first.")
+            print("Invalid checkpoint format!")
             return
     else:
-        print("Model directory does not exist! Please train the model first.")
+        print(f"Model file does not exist: {args.model_path}")
         return
     
     model.cuda()
+    model.eval()
+    
+    # Create custom dataset that doesn't auto-resize (we'll handle scaling manually)
+    class InferenceDataset(LiverMRIValidationDataset):
+        def __init__(self, data_root, transforms):
+            super().__init__(data_root, transforms, target_size=None)  # Don't auto-resize
+            
+        def auto_resize(self, img):
+            # Don't resize - keep original resolution
+            return img.astype(np.float32)
+            
+        def auto_resize_segmentation(self, seg):
+            # Don't resize - keep original resolution  
+            return seg.astype(np.int16)
     
     # Prepare test dataset
     test_composed = transforms.Compose([
         trans.NumpyType((np.float32, np.int16)),
     ])
     
-    test_set = LiverMRIValidationDataset(data_root, transforms=test_composed)
+    test_set = InferenceDataset(args.data_root, transforms=test_composed)
     test_loader = DataLoader(test_set, batch_size=1, shuffle=False, num_workers=1, pin_memory=True, drop_last=True)
     
     # Evaluation metrics
@@ -54,7 +108,8 @@ def main():
     eval_det = utils.AverageMeter()
     
     # CSV output setup
-    csv_name = 'experiments/' + model_folder[:-1] + '_results'
+    os.makedirs(args.output_dir, exist_ok=True)
+    csv_name = os.path.join(args.output_dir, 'inference_results')
     if os.path.exists(csv_name + '.csv'):
         os.remove(csv_name + '.csv')
     
@@ -62,47 +117,59 @@ def main():
     csv_writter('Patient,DSC_Raw,DSC_Registered,Jacobian_Negative', csv_name)
     
     print("Starting inference...")
+    print(f"Model input size: {args.model_size}")
+    
     with torch.no_grad():
         patient_idx = 0
         for data in test_loader:
-            model.eval()
             data = [t.cuda() for t in data]
-            x = data[0]  # moving image
-            y = data[1]  # fixed image
-            x_seg = data[2]  # moving segmentation
-            y_seg = data[3]  # fixed segmentation
-
-            # Forward pass
-            x_def, flow, disp = model((x, y))
-            flow = disp
+            x_orig = data[0]  # moving image - original resolution
+            y_orig = data[1]  # fixed image - original resolution
+            x_seg_orig = data[2]  # moving segmentation - original resolution
+            y_seg_orig = data[3]  # fixed segmentation - original resolution
             
-            # Warp moving segmentation to fixed space
-            def_out = transformation.warp(x_seg.cuda().float(), disp.cuda(), interp_mode='nearest')
+            # Get original image size
+            original_size = x_orig.shape[2:]  # [H, W, D]
+            print(f'Patient {patient_idx}: Original size {original_size}, scaling to {args.model_size}')
             
-            # Calculate Jacobian determinant
-            tar = y.detach().cpu().numpy()[0, 0, :, :, :]
-            jac_det = utils.jacobian_determinant_vxm(flow.detach().cpu().numpy()[0, :, :, :, :])
-            negative_jac_ratio = np.sum(jac_det <= 0) / np.prod(tar.shape)
+            # Resize images to model input size
+            x_model = resize_image_to_model(x_orig, args.model_size)
+            y_model = resize_image_to_model(y_orig, args.model_size)
             
-            # Calculate Dice coefficients
-            dsc_registered = utils.dice_val(def_out.long(), y_seg.long(), 3)  # 3 classes
-            dsc_raw = utils.dice_val(x_seg.long(), y_seg.long(), 3)
+            # Forward pass on model-sized images
+            x_def_model, flow_model, disp_model = model((x_model, y_model))
+            
+            # Resize flow back to original resolution
+            disp_orig = resize_flow_to_original(disp_model, original_size)
+            
+            # Apply flow to original resolution images
+            def_out = transformation.warp(x_seg_orig.cuda().float(), disp_orig.cuda(), interp_mode='nearest')
+            
+            # Calculate Jacobian determinant on original resolution
+            jac_det = utils.jacobian_determinant_vxm(disp_orig.detach().cpu().numpy()[0, :, :, :, :])
+            negative_jac_ratio = np.sum(jac_det <= 0) / np.prod(original_size)
+            
+            # Calculate Dice coefficients on original resolution
+            dsc_registered = utils.dice_val(def_out.long(), y_seg_orig.long(), args.num_classes)
+            dsc_raw = utils.dice_val(x_seg_orig.long(), y_seg_orig.long(), args.num_classes)
             
             # Update metrics
-            eval_dsc_def.update(dsc_registered.item(), x.size(0))
-            eval_dsc_raw.update(dsc_raw.item(), x.size(0))
-            eval_det.update(negative_jac_ratio, x.size(0))
+            eval_dsc_def.update(dsc_registered.item(), x_orig.size(0))
+            eval_dsc_raw.update(dsc_raw.item(), x_orig.size(0))
+            eval_det.update(negative_jac_ratio, x_orig.size(0))
             
             # Write results to CSV
             line = f'Patient_{patient_idx:03d},{dsc_raw.item():.4f},{dsc_registered.item():.4f},{negative_jac_ratio:.6f}'
             csv_writter(line, csv_name)
             
             print(f'Patient {patient_idx}: Raw DSC: {dsc_raw.item():.4f}, Registered DSC: {dsc_registered.item():.4f}, Neg Jac: {negative_jac_ratio:.6f}')
-            patient_idx += 1
             
             # Optional: Save some example results
-            if patient_idx <= 5:
-                save_example_results(x, y, x_def, def_out, y_seg, patient_idx, model_folder)
+            if patient_idx < 5:
+                save_example_results(x_orig, y_orig, transformation.warp(x_orig.cuda().float(), disp_orig.cuda(), interp_mode='bilinear'), 
+                                   def_out, y_seg_orig, patient_idx, args.output_dir)
+            
+            patient_idx += 1
 
         # Print final results
         print('\n=== Final Results ===')
@@ -121,9 +188,9 @@ def main():
         csv_writter(f'Negative Jacobian Mean,{eval_det.avg:.6f}', csv_name)
         csv_writter(f'DSC Improvement,{eval_dsc_def.avg - eval_dsc_raw.avg:.4f}', csv_name)
 
-def save_example_results(moving, fixed, registered, seg_registered, seg_fixed, patient_idx, model_folder):
+def save_example_results(moving, fixed, registered, seg_registered, seg_fixed, patient_idx, output_dir):
     """Save example registration results as images"""
-    save_dir = f'results/{model_folder[:-1]}/'
+    save_dir = os.path.join(output_dir, 'examples')
     os.makedirs(save_dir, exist_ok=True)
     
     # Convert to numpy and select middle slice
