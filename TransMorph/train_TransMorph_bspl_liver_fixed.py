@@ -175,15 +175,15 @@ def main(args):
             adjust_learning_rate(optimizer, epoch, args.max_epoch, args.lr)
             
             data = [t.cuda() for t in data]
-            x = data[0]  # moving image
-            y = data[1]  # fixed image
+            x = data[0].float()  # moving image - ensure float type
+            y = data[1].float()  # fixed image - ensure float type
             
             # Forward pass
             x_def, flow, disp = model((x, y))
             
             # Calculate losses
             loss_mse = criterion_mse(x_def, y)
-            loss_smooth = criterion_smooth(disp, y)  # Grad3d expects pred and target
+            loss_smooth = criterion_smooth(disp.float(), y)  # Ensure displacement is float
             
             loss = loss_mse * args.loss_weights[0] + loss_smooth * args.loss_weights[1]
             
@@ -209,10 +209,10 @@ def main(args):
             with torch.no_grad():
                 for data in val_loader:
                     data = [t.cuda() for t in data]
-                    x = data[0]
-                    y = data[1]
-                    x_seg = data[2]
-                    y_seg = data[3]
+                    x = data[0].float()
+                    y = data[1].float()
+                    x_seg = data[2]  # Keep as int for segmentation
+                    y_seg = data[3]  # Keep as int for segmentation
                     
                     # Forward pass
                     output = model((x, y))
