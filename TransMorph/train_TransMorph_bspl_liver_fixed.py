@@ -79,16 +79,27 @@ def main(args):
     
     # Load pretrained weights if provided
     if args.pretrained_weights and os.path.exists(args.pretrained_weights):
-        pretrained_dict = torch.load(args.pretrained_weights, map_location='cpu')
+        checkpoint = torch.load(args.pretrained_weights, map_location='cpu')
+        
+        # Handle different checkpoint formats
+        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+            pretrained_dict = checkpoint['state_dict']
+        else:
+            pretrained_dict = checkpoint
+            
         model_dict = model.state_dict()
         
-        # Filter pretrained dict
-        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-        model_dict.update(pretrained_dict)
+        # Filter pretrained dict to match model keys
+        filtered_dict = {}
+        for k, v in pretrained_dict.items():
+            if k in model_dict and model_dict[k].shape == v.shape:
+                filtered_dict[k] = v
+        
+        model_dict.update(filtered_dict)
         model.load_state_dict(model_dict)
         
         print(f'Loading pre-trained weights from: {args.pretrained_weights}')
-        print(f'Loaded {len(pretrained_dict)} pretrained parameters')
+        print(f'Loaded {len(filtered_dict)} pretrained parameters')
     
     # Data transforms
     train_composed = transforms.Compose([
@@ -119,7 +130,13 @@ def main(args):
     
     # Setup optimizer and loss
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=0, amsgrad=True)
-    criterion = nn.MSELoss()
+    
+    # Import losses
+    import losses
+    
+    # Setup loss functions
+    criterion_mse = nn.MSELoss()
+    criterion_smooth = losses.Grad3d(penalty='l2')
     
     # Create output directories
     save_dir = f'TransMorphBSpline_Liver_mse_{args.loss_weights[0]}_diffusion_{args.loss_weights[1]}/'
@@ -146,8 +163,6 @@ def main(args):
     
     # Training loop
     best_dsc = 0
-    transformation_model = transformation.SpatialTransformer(config.img_size, mode='bilinear')
-    transformation_model.cuda()
     
     for epoch in range(args.max_epoch):
         print(f'Epoch {epoch}/{args.max_epoch}')
@@ -167,8 +182,8 @@ def main(args):
             x_def, flow, disp = model((x, y))
             
             # Calculate losses
-            loss_mse = criterion(x_def, y)
-            loss_smooth = utils.smoothloss(disp)
+            loss_mse = criterion_mse(x_def, y)
+            loss_smooth = criterion_smooth(disp, y)  # Grad3d expects pred and target
             
             loss = loss_mse * args.loss_weights[0] + loss_smooth * args.loss_weights[1]
             
@@ -202,8 +217,8 @@ def main(args):
                     # Forward pass
                     output = model((x, y))
                     
-                    # Warp segmentation
-                    def_out = transformation_model(x_seg.cuda().float(), output[2].cuda())
+                    # Warp segmentation using transformation.warp
+                    def_out = transformation.warp(x_seg.cuda().float(), output[2].cuda(), interp_mode='nearest')
                     
                     # Calculate Dice
                     dsc = utils.dice_val(def_out.long(), y_seg.long(), args.num_classes)
