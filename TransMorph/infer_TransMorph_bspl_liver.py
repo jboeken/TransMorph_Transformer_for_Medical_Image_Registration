@@ -250,6 +250,10 @@ def main():
             x_model = resize_image_to_model(x_orig, args.model_size)
             y_model = resize_image_to_model(y_orig, args.model_size)
             
+            # Ensure float type for model input (consistency with training)
+            x_model = x_model.float()
+            y_model = y_model.float()
+            
             # Forward pass on model-sized images
             x_def_model, flow_model, disp_model = model((x_model, y_model))
             
