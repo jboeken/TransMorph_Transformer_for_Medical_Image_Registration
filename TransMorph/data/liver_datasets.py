@@ -36,7 +36,7 @@ class LiverMRIDataset(Dataset):
                 patient_sessions[patient_id].append(sequence_num)
         
         # Filter patients with at least 2 sequences available
-        self.patient_data = []
+        patient_data = []
         for patient_id, sequences in patient_sessions.items():
             if len(sequences) >= 2:  # Need at least 2 sequences for registration
                 # Check if any corresponding label exists
@@ -44,7 +44,7 @@ class LiverMRIDataset(Dataset):
                 label_files = glob.glob(label_pattern)
                 
                 if label_files:  # At least one label file exists
-                    self.patient_data.append({
+                    patient_data.append({
                         'patient_id': patient_id,
                         'sequences': sorted(sequences),
                         'label_file': label_files[0]  # Use first available label
@@ -52,20 +52,38 @@ class LiverMRIDataset(Dataset):
         
         # Split into train/val
         random.seed(42)
-        random.shuffle(self.patient_data)
-        split_idx = int(len(self.patient_data) * (1 - val_ratio))
+        random.shuffle(patient_data)
+        split_idx = int(len(patient_data) * (1 - val_ratio))
         
         if split == 'train':
-            self.patient_data = self.patient_data[:split_idx]
+            self.patient_data = patient_data[:split_idx]
         else:
-            self.patient_data = self.patient_data[split_idx:]
+            self.patient_data = patient_data[split_idx:]
+        
+        # Pre-compute all valid pairs to avoid complex indexing during training
+        self.pairs = []
+        for patient in self.patient_data:
+            sequences = patient['sequences']
+            patient_id = patient['patient_id']
+            label_file = patient['label_file']
+            
+            # Generate all possible pairs for this patient (limit to reduce memory)
+            for i, moving_seq in enumerate(sequences):
+                for j, fixed_seq in enumerate(sequences):
+                    if i != j:  # Don't pair sequence with itself
+                        self.pairs.append({
+                            'patient_id': patient_id,
+                            'moving_seq': moving_seq,
+                            'fixed_seq': fixed_seq,
+                            'label_file': label_file
+                        })
         
         print(f"Loaded {len(self.patient_data)} patients for {split}")
         print(f"Total sequences available: {sum(len(p['sequences']) for p in self.patient_data)}")
+        print(f"Generated {len(self.pairs)} training pairs")
 
     def __len__(self):
-        # Each patient can generate multiple pairs based on available sequences
-        return sum(len(p['sequences']) * (len(p['sequences']) - 1) for p in self.patient_data)
+        return len(self.pairs)
 
     def load_nifti(self, filepath):
         """Load NIfTI file and return data array"""
@@ -86,36 +104,15 @@ class LiverMRIDataset(Dataset):
         return img.astype(np.float32)
 
     def __getitem__(self, index):
-        # Find which patient and sequence pair this index corresponds to
-        cumulative_pairs = 0
-        patient_idx = 0
-        
-        for i, patient in enumerate(self.patient_data):
-            num_pairs = len(patient['sequences']) * (len(patient['sequences']) - 1)
-            if index < cumulative_pairs + num_pairs:
-                patient_idx = i
-                pair_idx = index - cumulative_pairs
-                break
-            cumulative_pairs += num_pairs
-        
-        patient = self.patient_data[patient_idx]
-        sequences = patient['sequences']
-        
-        # Calculate which sequence pair this corresponds to
-        num_sequences = len(sequences)
-        moving_seq_idx = pair_idx // (num_sequences - 1)
-        fixed_seq_idx = pair_idx % (num_sequences - 1)
-        
-        # Adjust fixed index to skip the moving sequence
-        if fixed_seq_idx >= moving_seq_idx:
-            fixed_seq_idx += 1
-        
-        moving_seq = sequences[moving_seq_idx]
-        fixed_seq = sequences[fixed_seq_idx]
+        # Get pre-computed pair
+        pair = self.pairs[index]
+        patient_id = pair['patient_id']
+        moving_seq = pair['moving_seq']
+        fixed_seq = pair['fixed_seq']
         
         # Construct file paths
-        moving_path = os.path.join(self.mri_dir, f'{patient["patient_id"]}_B_C_R_applyXFM_{moving_seq}.nii.gz')
-        fixed_path = os.path.join(self.mri_dir, f'{patient["patient_id"]}_B_C_R_applyXFM_{fixed_seq}.nii.gz')
+        moving_path = os.path.join(self.mri_dir, f'{patient_id}_B_C_R_applyXFM_{moving_seq}.nii.gz')
+        fixed_path = os.path.join(self.mri_dir, f'{patient_id}_B_C_R_applyXFM_{fixed_seq}.nii.gz')
         
         # Load images
         try:
